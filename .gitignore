@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local scratch (not for publication)
+temp/
+
+# Runtime mailbox state
+.pi-mailbox/
