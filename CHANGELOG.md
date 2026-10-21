@@ -13,7 +13,8 @@ All notable changes to this project are documented here. The format is based on
 - Stdio MCP server (`pi-mailbox serve`) with four tools: `send`, `inbox`, `read`, `ack`.
 - Durable, atomic, per-message JSON storage under `~/.pi-mailbox` (or `PI_MAILBOX_DIR`).
 - Identity from `PI_MAILBOX_AGENT` only, with an `flock` so one name has one live server.
-- Broadcast (`"all"` or a list), threads via `reply_to`, and per-message TTL expiry.
+- Broadcast (`"all"` or a list), threads via `reply_to`, and per-message TTL expiry;
+  `send` echoes `ttl_seconds` and `expires_at` when a TTL is set.
 - CLI with `send`, `inbox`, `read`, `ack` and `nudge` (tmux) subcommands, printing JSON.
 - `owner` sender for notes from a human via the CLI.
 

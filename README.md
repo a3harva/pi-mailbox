@@ -91,7 +91,7 @@ Pi shows the tools to the model as `mcp__pi_mailbox__send`, `…__inbox`, `…__
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `send` | `to` (name, list of names, or `"all"`), `subject`, `body`, optional `reply_to`, optional `ttl_seconds` | `{id, to, path, created_at, thread, warnings?}` |
+| `send` | `to` (name, list of names, or `"all"`), `subject`, `body`, optional `reply_to`, optional `ttl_seconds` | `{id, to, path, created_at, thread, ttl_seconds?, expires_at?, warnings?}` |
 | `inbox` | optional `include_read` (false), `limit` (20), `include_expired` (false) | `{agent, messages: [{id, from, subject, created_at, age, thread, unread, status, expires_at?}]}` |
 | `read` | `id` | `{id, from, to, subject, body, created_at, reply_to, thread, already_read, status, expired, mailbox}` — marks it read |
 | `ack` | `id` | `{id, acknowledged: true, already_acked}` |
@@ -102,7 +102,7 @@ Behaviour worth knowing:
 - **`"all"`** means every other known agent (not yourself, not `owner`). Each recipient
   gets its own copy with the same id, acknowledged independently.
 - **Unknown recipients are queued, with a warning.** An agent becomes known the first time
-  it runs as itself; until then `send` still delivers but returns a `warnings` entry, so a
+  it uses its own mailbox (its server starts, or it calls `inbox`, `read` or `ack`); until then `send` still delivers but returns a `warnings` entry, so a
   typo like `pi2` is visible instead of a silent black hole.
 - **Read is not acknowledge.** `read` marks a message read and leaves it in the inbox;
   `ack` moves it to `done/`. Acking twice is a no-op that reports `already_acked: true`.

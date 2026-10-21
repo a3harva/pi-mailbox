@@ -49,12 +49,20 @@ def test_send_writes_a_complete_private_file(root, agent):
 def test_message_to_an_agent_that_never_started_waits_for_it(root, agent):
     a = agent("pi-main")
     sent = a.send("pi-9", "hello", "are you there?")
-    assert "never started" in sent["warnings"][0]
+    assert "has not used its mailbox yet" in sent["warnings"][0]
     assert "pi-9" not in a.known_agents()
 
     later = agent("pi-9")  # the agent starts afterwards
     assert [m["id"] for m in later.inbox()["messages"]] == [sent["id"]]
     assert "warnings" not in a.send("pi-9", "again", "now known")
+
+
+def test_an_agent_that_only_checks_its_inbox_becomes_known(root, agent):
+    a = agent("pi-main")
+    assert "warnings" in a.send("cli-only", "s", "b")
+    Mailbox("cli-only", root).inbox()  # e.g. `pi-mailbox inbox --as cli-only`, no server
+    assert "cli-only" in a.known_agents()
+    assert "warnings" not in a.send("cli-only", "s", "b")
 
 
 def test_timestamps_are_iso8601_with_timezone(agent):
@@ -197,8 +205,13 @@ def test_broadcast_with_nobody_else_is_an_error(agent):
 def test_expired_messages_are_hidden_kept_and_flagged(root, agent, monkeypatch):
     a, b = agent("a"), agent("b")
     live = a.send("b", "live", "x")["id"]
-    short = a.send("b", "short", "x", ttl_seconds=60)["id"]
-    assert b.inbox()["messages"][1]["expires_at"]
+    sent = a.send("b", "short", "x", ttl_seconds=60)
+    short = sent["id"]
+    assert sent["ttl_seconds"] == 60
+    created, expires = (core.datetime.fromisoformat(sent[k]) for k in ("created_at", "expires_at"))
+    assert expires - created == timedelta(seconds=60)
+    assert "expires_at" not in a.send("a", "no ttl", "x")
+    assert b.inbox()["messages"][1]["expires_at"] == sent["expires_at"]
 
     later = core._now() + timedelta(seconds=120)
     monkeypatch.setattr(core, "_now", lambda: later)

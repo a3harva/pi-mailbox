@@ -352,8 +352,9 @@ class Mailbox:
         for name in recipients:
             if name not in known:
                 warnings.append(
-                    f"agent {name!r} has never started a pi-mailbox server; the message "
-                    "is queued and will be waiting when it does (check the name for typos)"
+                    f"agent {name!r} has not used its mailbox yet (no server start, inbox, "
+                    "read or ack); the message is queued and will be waiting (check the "
+                    "name for typos)"
                 )
 
         thread = None
@@ -407,6 +408,9 @@ class Mailbox:
                 "created_at": message["created_at"],
                 "thread": message["thread"],
             }
+            if ttl_seconds:
+                result["ttl_seconds"] = ttl_seconds
+                result["expires_at"] = message["expires_at"]
             if warnings:
                 result["warnings"] = warnings
             return result
@@ -420,11 +424,10 @@ class Mailbox:
         """``{"agent": <this agent>, "messages": [...]}``, oldest first."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise MailboxError("limit must be a positive integer")
+        self.register()  # checking mail counts as using the mailbox
         items: list[dict[str, Any]] = []
         report = {"agent": self.agent, "messages": items}
         box = self._box(self.agent, INBOX)
-        if not box.is_dir():
-            return report
         done = self._box(self.agent, DONE)
         now = _now()
         for path in sorted(box.glob("msg-*.json")):
