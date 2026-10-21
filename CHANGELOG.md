@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-21
+## [0.1.0] - 2026-10-23
 
 ### Added
 
@@ -17,6 +17,9 @@ All notable changes to this project are documented here. The format is based on
   `send` echoes `ttl_seconds` and `expires_at` when a TTL is set.
 - CLI with `send`, `inbox`, `read`, `ack` and `nudge` (tmux) subcommands, printing JSON.
 - `owner` sender for notes from a human via the CLI.
+- Sending to an agent that has never used its mailbox (started a server, or called
+  `inbox`, `read` or `ack`) still queues the message and returns a warning, so typos in
+  names are visible.
 
 [Unreleased]: https://github.com/a3harva/pi-mailbox/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/a3harva/pi-mailbox/releases/tag/v0.1.0
