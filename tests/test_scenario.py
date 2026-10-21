@@ -38,8 +38,8 @@ def test_handoff_and_reply_between_two_sessions(root: Path):
                 main,
                 "send",
                 to="pi-2",
-                subject="Workday: backend role",
-                body="Answer the three custom questions. Report back with the screenshot path.",
+                subject="Review: auth module",
+                body="Review the auth module diff. Report back with the findings file path.",
             )
             assert "warnings" not in task  # pi-2 is running, so it is known
 
@@ -49,14 +49,14 @@ def test_handoff_and_reply_between_two_sessions(root: Path):
             assert item["id"] == task["id"] and item["from"] == "pi-main" and item["unread"]
 
             msg = await call(pi2, "read", id=task["id"])
-            assert msg["body"].startswith("Answer the three") and not msg["already_read"]
+            assert msg["body"].startswith("Review the auth") and not msg["already_read"]
 
             reply = await call(
                 pi2,
                 "send",
                 to="pi-main",
-                subject="re: Workday: backend role",
-                body="Submitted. Evidence temp/submitted.png.",
+                subject="re: Review: auth module",
+                body="Done. Findings in temp/review.md.",
                 reply_to=task["id"],
             )
             assert (await call(pi2, "ack", id=task["id"]))["already_acked"] is False
