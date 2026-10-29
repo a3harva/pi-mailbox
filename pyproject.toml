@@ -1,14 +1,14 @@
 [project]
-name = "pi-mailbox"
+name = "agent-mailbox"
 version = "0.1.0"
-description = "A durable, local, file-based mailbox so Pi coding agents on one machine can message each other."
+description = "A durable local mailbox so coding agents (Claude Code, Pi, any MCP client) on one machine can message each other."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Atharva Joshi" }]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = ["mcp>=2.3,<3"]
-keywords = ["pi", "mcp", "agents", "mailbox", "tmux"]
+keywords = ["mcp", "agents", "mailbox", "claude-code", "pi", "tmux"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -16,30 +16,34 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
 ]
 
 [project.urls]
-Repository = "https://github.com/a3harva/pi-mailbox"
+Repository = "https://github.com/a3harva/agent-mailbox"
 
 [project.scripts]
-pi-mailbox = "pi_mailbox.cli:main"
+agent-mailbox = "agent_mailbox.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "hypothesis>=6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["tmux: needs a tmux binary"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]

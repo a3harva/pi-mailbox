@@ -1,73 +1,93 @@
+"""Owner CLI and the status dashboard."""
+
+from __future__ import annotations
+
 import io
 import json
-import shutil
-import subprocess
-import time
-import uuid
+from contextlib import redirect_stderr, redirect_stdout
 
-import pytest
-
-from pi_mailbox import cli
+from agent_mailbox import mail
+from agent_mailbox.cli import main
+from agent_mailbox.db import tx
 
 
-def run(capsys, *argv):
-    code = cli.main(list(argv))
-    out, err = capsys.readouterr()
-    return code, (json.loads(out) if out.strip() else None), err
+def cli(*args, stdin=None, monkeypatch=None):
+    out, err = io.StringIO(), io.StringIO()
+    if stdin is not None:
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+    with redirect_stdout(out), redirect_stderr(err):
+        code = main(list(args))
+    return code, out.getvalue(), err.getvalue()
 
 
-def test_cli_round_trip_as_owner(root, capsys, monkeypatch):
-    code, sent, _ = run(
-        capsys, "send", "--from", "owner", "--to", "pi-2", "--subject", "note", "--body", "hello"
+def test_send_inbox_read_close_both_modes(make_ident, conn, root, monkeypatch):
+    a = make_ident()
+    code, out, _ = cli(
+        "send",
+        "--to",
+        a.alias,
+        "--subject",
+        "s",
+        "--body-file",
+        "-",
+        "--json",
+        stdin="from stdin",
+        monkeypatch=monkeypatch,
     )
-    assert code == 0 and sent["to"] == "pi-2"
+    assert code == 0
+    mid = json.loads(out)["id"]
+    code, out, _ = cli("send", "--to", a.alias, "--subject", "human", "--body", "b")
+    assert code == 0 and out.startswith("sent ")
+    code, out, _ = cli("inbox", "--as", a.alias)
+    assert "human" in out and "new (2)" in out
+    code, out, err = cli("read", mid, "--as", a.alias, "--json")
+    assert json.loads(out)["body"].count("from stdin") == 1 and "debugging" in err
+    assert cli("defer", mid, "--as", a.alias, "--note", "later")[0] == 0
+    assert cli("close", mid, "--as", a.alias, "--resolution", "done")[0] == 0
+    code, out, _ = cli("status", mid, "--json")
+    assert json.loads(out)["recipients"][0]["resolution"] == "done"
 
-    monkeypatch.setenv("PI_MAILBOX_AGENT", "pi-2")
-    code, inbox, _ = run(capsys, "inbox")
-    assert inbox["messages"][0]["from"] == "owner"
-    _, msg, _ = run(capsys, "read", sent["id"])
-    assert msg["body"] == "hello"
-    _, acked, _ = run(capsys, "ack", sent["id"])
-    assert acked["acknowledged"] is True
 
-
-def test_cli_body_from_stdin_and_comma_recipients(root, capsys, monkeypatch):
-    monkeypatch.setattr("sys.stdin", io.StringIO("piped body"))
-    code, sent, _ = run(
-        capsys, "send", "--from", "a", "--to", "b,c", "--subject", "s", "--body-file", "-"
+def test_round_trip_with_agent_reply(make_ident, conn, root):
+    a = make_ident()
+    code, out, _ = cli("send", "--to", a.alias, "--subject", "q", "--body", "?", "--json")
+    mid = json.loads(out)["id"]
+    mail.send(
+        conn, root, mail.Sender(a.alias, a.session_id, "mcp"), "owner", "answer", "42", reply_to=mid
     )
-    assert code == 0 and sent["to"] == ["b", "c"]
+    code, out, _ = cli("inbox", "--json")
+    assert json.loads(out)["new"][0]["subject"] == "answer"
 
 
-def test_cli_errors_are_json_on_stderr(root, capsys):
-    code, out, err = run(capsys, "inbox")
-    assert code == 1 and out is None
-    assert "no identity" in json.loads(err)["error"]
-    code, _, err = run(capsys, "read", "../x", "--as", "a")
-    assert code == 1 and "invalid message id" in err
-
-
-def test_nudge_missing_session_warns_and_succeeds(capsys):
-    code, result, err = run(capsys, "nudge", f"no-such-session-{uuid.uuid4().hex}")
-    assert code == 0 and result["nudged"] is False
-    assert "pi-mailbox:" in err
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_nudge_types_into_a_real_tmux_session(capsys):
-    session = f"pi-mailbox-test-{uuid.uuid4().hex[:8]}"
-    subprocess.run(["tmux", "new-session", "-d", "-s", session, "cat"], check=True)
+def test_errors_exit_1_usage_exit_2(capsys):
+    assert cli("read", "nope")[0] == 1
     try:
-        code, result, _ = run(capsys, "nudge", session, "--text", "check; $(not run)")
-        assert code == 0 and result["nudged"] is True
-        pane = ""
-        for _ in range(50):
-            pane = subprocess.run(
-                ["tmux", "capture-pane", "-p", "-t", session], capture_output=True, text=True
-            ).stdout
-            if "check; $(not run)" in pane:
-                break
-            time.sleep(0.05)
-        assert "check; $(not run)" in pane
-    finally:
-        subprocess.run(["tmux", "kill-session", "-t", f"={session}"], check=False)
+        main(["send"])
+    except SystemExit as exc:
+        assert exc.code == 2
+
+
+def test_agents_and_dashboard(make_ident, conn, root):
+    a = make_ident()
+    a.set_role("docs", "writes docs")
+    m = mail.send(conn, root, mail.Sender("owner", None, "cli"), a.alias, "please", "x")
+    mail.defer(conn, a.alias, m["id"], note="busy")
+    code, out, _ = cli("agents")
+    assert "claude-code-my-proj-docs" in out and "writes docs" in out
+    code, out, _ = cli("status")
+    assert "deferred: please (busy)" in out and "owner" in out
+    with tx(conn):
+        conn.execute("UPDATE deliveries SET overdue_at = 1")
+    code, out, _ = cli("status", "--overdue-only", "--json")
+    rows = json.loads(out)["agents"]
+    assert [r["alias"] for r in rows] == [a.alias] and rows[0]["overdue"]
+    code, out, _ = cli("status", "--overdue-only")
+    assert "OVERDUE" in out
+
+
+def test_set_role_and_retire_commands(make_ident, root):
+    a = make_ident()
+    assert cli("set-role", a.alias, "reviewer")[0] == 0
+    assert a.apply_pending_role()["alias"].endswith("-reviewer")
+    a.end()
+    assert cli("retire", a.alias)[0] == 0

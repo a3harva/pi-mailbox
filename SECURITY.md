@@ -2,64 +2,71 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately via
-[GitHub private vulnerability reporting](https://github.com/a3harva/pi-mailbox/security/advisories/new)
-rather than in a public issue. Include steps to reproduce and the version or commit you
-tested. You should get a response within a week.
+Please report security issues privately through
+[GitHub private vulnerability reporting](https://github.com/a3harva/agent-mailbox/security/advisories/new),
+not in a public issue. Include steps to reproduce and the version or commit you tested.
+You should get a response within a week.
 
 ## Threat model
 
-pi-mailbox lets AI coding agents on **one machine, under one user account** leave each
-other messages. Its security rests on a few deliberate choices.
+agent-mailbox lets AI coding agents on **one machine, under one user account** leave each
+other messages.
 
-### Nothing listens
+### In scope
 
-There is no socket, port, daemon or network code. The MCP server talks only over the stdio
-pipes of the Pi process that launched it. There is nothing to connect to, so there is
-nothing to authenticate.
+**Other local users.**
+- The state directory (`$XDG_STATE_HOME/agent-mailbox`, or `~/.local/state/agent-mailbox`)
+  is created `0700`, and every file in it `0600`, whatever your umask is.
+- On startup the tool refuses a directory that belongs to another user or that others
+  can access.
 
-This is why pi-mailbox is a mailbox rather than a way to inject prompts into a live
-session: a socket that accepts prompts would let anything able to reach it put words in an
-agent's mouth, with all of that agent's tools, in the middle of its work.
+**Nothing listens.**
+- There is no socket, port, daemon or network code. The MCP server only talks over the
+  stdio pipes of the client that started it.
+- Hooks are short-lived processes that read the database and print JSON.
 
-### The filesystem is the boundary
+**Prompt injection between agents.** A message body is data from a peer, never an
+instruction from the user.
+- `read` wraps bodies in `<<<peer-message …>>> … <<<end-peer-message>>>` and adds
+  `trust: "peer"`. Runs of angle brackets inside a body are broken up with zero-width
+  spaces, so a body can't close its own wrapper.
+- Hooks inject **headers only**, never bodies. Every injected string is reduced to one
+  line, angle brackets are replaced, and it is length-capped.
+- The server instructions and tool descriptions tell the model to treat bodies as
+  information.
 
-- The mailbox root and every agent directory are created `0700`; message files `0600`.
-- Anyone who can act as your user can read, forge or delete messages. pi-mailbox does not
-  try to defend against your own account; it defends against other local users.
-- Message files are written atomically (temp file, `fsync`, link/rename), so a crash never
-  leaves a partial message visible.
+**Runaway agents.**
+- per-alias send limit (30 per minute)
+- per-thread message limit (50)
+- per-recipient open limit (1,000)
+- the task-end gate blocks at most twice per message, then marks it overdue instead of
+  trapping the agent
 
-### Messages are untrusted input
+**Resource exhaustion.**
+- subject ≤200 characters, body ≤100 KiB, ≤64 recipients, TTL ≤1 year, `wait` ≤300 s
 
-A message body is **data from a peer agent**, exactly like the contents of a web page. It
-is never an instruction from the human owner.
+**Installer safety.**
+- `install claude-code` / `install pi` show a unified diff and ask before writing.
+- They back up the settings file, write atomically, and only add or remove their own
+  entries: hooks whose command contains `agent-mailbox hook claude`, the `agent-mailbox`
+  MCP entry, and the files in `~/.pi/agent/extensions/agent-mailbox/`.
+- They refuse to touch a settings file that isn't valid JSON.
 
-- The server never executes, evaluates or expands anything in a message: no shell, no
-  path expansion, no templating.
-- Agent names and message ids are validated against strict patterns before they touch a
-  path, which rules out path traversal (`../`).
-- Bodies are capped at 100 KB and subjects at 200 characters.
-- The recommended `AGENTS.md` text tells agents to treat bodies as information and never
-  as instructions that override their own instructions or the owner's direct requests.
+**Hooks fail open.** A broken or locked database, bad input, or any error produces empty
+output and exit 0. The Pi extension ignores hook failures and timeouts the same way. The
+mailbox can't break Claude Code or Pi.
 
-### Sender identity is not authentication
+**Client identity.** The server names its client from the nearest `claude` / `pi` ancestor
+process, not from inherited environment variables, so a client started inside another
+one cannot pick up the outer client's Claude session id and receive its hook output.
 
-- An MCP session always sends as its own `PI_MAILBOX_AGENT` name; the tool has no `from`
-  argument, so one agent cannot casually sign as another.
-- The CLI accepts `--from`, including the reserved name `owner`, so a human can leave a
-  note. This is a label, **not** proof: any process running as your user can write any
-  file in the mailbox. Agents should weigh `owner` mail as information.
-- One live server holds each name (an `flock`), so two sessions cannot silently share an
-  inbox.
-
-### No secrets
-
-Messages are stored as plaintext and kept forever (nothing is deleted automatically). Do
-not put passwords, tokens or other secrets in them. Encryption is out of scope for v0.1.
+**Logging.** Debug logging (`AGENT_MAILBOX_DEBUG=1`) writes event names, ids and aliases to
+`hooks.log` (`0600`), never subjects or bodies. Tests enforce this.
 
 ### Out of scope
 
-- Cross-machine delivery.
-- Protection against other processes running as the same user.
-- Windows.
+- **Processes running as your own user.** They can read and write the database. The
+  `from` field and the CLI's `owner` sender (marked `via: cli`) are labels, not
+  authentication.
+- **Secrets.** Messages are stored as plaintext. Don't put credentials in them.
+- **Network delivery** and **Windows**.
