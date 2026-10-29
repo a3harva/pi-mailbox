@@ -21,7 +21,7 @@ jobs:
           AGENT_MAILBOX_DIR=/tmp/smoke-state /tmp/smoke/bin/agent-mailbox --version
           AGENT_MAILBOX_DIR=/tmp/smoke-state /tmp/smoke/bin/agent-mailbox doctor claude-code \
             --settings-file /tmp/s.json --mcp-config /tmp/m.json || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
