@@ -30,7 +30,7 @@ Repository = "https://github.com/a3harva/agent-mailbox"
 agent-mailbox = "agent_mailbox.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.11,<0.12"]
+requires = ["uv_build>=0.13.5,<0.14"]
 build-backend = "uv_build"
 
 [dependency-groups]
