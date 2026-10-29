@@ -67,8 +67,9 @@ def test_real_tmux_wake_and_debounce(make_ident, conn, root, tmp_path):
         assert first[0]["woke"] is True
         second = wake.maybe_wake(conn, root, [a.alias], "normal")
         assert second[0] == {"alias": a.alias, "woke": False, "reason": "debounced"}
+        # The pane's shell may not have created the file yet (seen on Linux CI).
         deadline = time.time() + 5
-        while time.time() < deadline and wake.WAKE_TEXT not in out.read_text():
+        while time.time() < deadline and not (out.exists() and wake.WAKE_TEXT in out.read_text()):
             time.sleep(0.1)
         assert out.read_text().count(wake.WAKE_TEXT) == 1
     finally:
