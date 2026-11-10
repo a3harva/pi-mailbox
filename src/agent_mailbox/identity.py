@@ -24,6 +24,7 @@ MAX_PURPOSE = 200
 MAX_FORWARD_DEPTH = 5
 PROVISIONAL_TTL = 24 * 3600
 FORWARDER_TTL = 7 * 24 * 3600
+STARTUP_GRACE_SECONDS = 60
 
 KNOWN_CLIENTS = {"claude-code": "claude-code", "claude code": "claude-code", "pi": "pi"}
 # Process names of the clients, for when the environment is ambiguous: a client started
@@ -79,6 +80,9 @@ def normalise_role(role: object) -> str:
         value = slug(role, max_len=MAX_ROLE)
     except ValueError as exc:
         raise MailboxError(f"invalid role: {exc}") from None
+    if value in RESERVED:
+        # '<client>-<project>-owner' would read like the human owner in a digest line.
+        raise MailboxError(f"role {value!r} is reserved; choose another role")
     if not 1 <= len(value.split("-")) <= 4:
         raise MailboxError("role must be 1-4 words, e.g. 'refactor-agent'")
     return value
@@ -99,17 +103,37 @@ def _lock_path(root: Path, alias: str) -> Path:
     return root / "locks" / f"{alias}.lock"
 
 
+LOCK_ATTEMPTS = 5
+LOCK_RETRY_SECONDS = 0.02
+
+
 def acquire_lock(root: Path, alias: str, session_id: str) -> int | None:
-    """Take the alias's flock for this process. None if another process holds it."""
-    fd = open_private_file(_lock_path(root, alias))
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        return None
-    os.ftruncate(fd, 0)
-    os.pwrite(fd, f"{session_id}\n".encode(), 0)
-    return fd
+    """Take the alias's flock for this process. None if another process holds it.
+
+    A liveness probe (``is_live``) holds a shared lock for an instant, so one failed
+    attempt does not prove a live holder: retry briefly before giving up.
+    """
+    path = _lock_path(root, alias)
+    for attempt in range(LOCK_ATTEMPTS):
+        fd = open_private_file(path)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            if attempt + 1 < LOCK_ATTEMPTS:
+                time.sleep(LOCK_RETRY_SECONDS)
+            continue
+        try:
+            same_file = os.fstat(fd).st_ino == os.stat(path).st_ino
+        except FileNotFoundError:
+            same_file = False
+        if not same_file:  # the file was cleaned up under us; lock the new one instead
+            os.close(fd)
+            continue
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{session_id}\n".encode(), 0)
+        return fd
+    return None
 
 
 def release_lock(fd: int | None) -> None:
@@ -122,10 +146,10 @@ def release_lock(fd: int | None) -> None:
 
 
 def is_live(root: Path, alias: str) -> bool:
-    path = _lock_path(root, alias)
-    if not path.exists():
+    try:
+        fd = os.open(_lock_path(root, alias), os.O_RDONLY)
+    except FileNotFoundError:
         return False
-    fd = os.open(path, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -176,13 +200,25 @@ def open_counts(conn: sqlite3.Connection, alias: str) -> dict[str, int]:
 
 def reconcile_stale_sessions(conn: sqlite3.Connection, root: Path) -> None:
     """Mark sessions whose server died (alias lock free) as ended."""
-    rows = conn.execute("SELECT id, alias FROM sessions WHERE ended_at IS NULL").fetchall()
-    dead = [r["id"] for r in rows if not r["alias"] or not is_live(root, r["alias"])]
+    t = now()
+    rows = conn.execute(
+        "SELECT id, alias, started_at FROM sessions WHERE ended_at IS NULL"
+    ).fetchall()
+    dead = []
+    for r in rows:
+        if not r["alias"]:
+            # A server that is starting right now has a row but no alias yet.
+            if t - r["started_at"] > STARTUP_GRACE_SECONDS:
+                dead.append((t, r["id"], None))
+        elif not is_live(root, r["alias"]):
+            dead.append((t, r["id"], r["alias"]))
     if dead:
         with tx(conn):
+            # "alias IS ?" skips a session that changed alias (set_role) since we looked:
+            # its old lock is free, but it is alive under the new one.
             conn.executemany(
-                "UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
-                [(now(), sid) for sid in dead],
+                "UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL AND alias IS ?",
+                dead,
             )
 
 
@@ -286,6 +322,7 @@ class Identity:
             or procs.nearest_named(CLIENT_PROCESSES)
             or detect_client(env)
         )
+        nested = procs.count_named(CLIENT_PROCESSES) > 1
         ident = cls(
             conn=conn,
             root=root,
@@ -309,7 +346,10 @@ class Identity:
                     (env.get("CLAUDE_CODE_SESSION_ID") or None)
                     if client == "claude-code"
                     else None,
-                    env.get("TMUX_PANE") or None,
+                    # A client started by another client (e.g. `claude -p` from a session's
+                    # shell) inherits that client's pane; typing there would wake the
+                    # wrong session.
+                    None if nested else (env.get("TMUX_PANE") or None),
                     t,
                 ),
             )
@@ -365,7 +405,39 @@ class Identity:
             )
 
     def touch(self) -> None:
-        self.conn.execute("UPDATE agents SET last_seen_at = ? WHERE alias = ?", (now(), self.alias))
+        with tx(self.conn):
+            self.conn.execute(
+                "UPDATE agents SET last_seen_at = ? WHERE alias = ?", (now(), self.alias)
+            )
+            # We are evidently alive: undo a reconcile that wrongly marked us ended, or
+            # hooks and wake-ups would never find this session again.
+            self.conn.execute(
+                "UPDATE sessions SET ended_at = NULL WHERE id = ? AND ended_at IS NOT NULL",
+                (self.session_id,),
+            )
+
+    def resume_previous_role(self, claude_session_id: str | None) -> dict[str, Any] | None:
+        """Take back the durable alias this Claude Code conversation held before.
+
+        The server restarts when the client resumes a conversation or reconnects its MCP
+        servers; the conversation still believes it is, say, the refactor agent, so mail
+        to that alias has to keep reaching it.
+        """
+        if not claude_session_id or not self.provisional:
+            return None
+        row = self.conn.execute(
+            "SELECT a.role FROM sessions s JOIN agents a ON a.alias = s.alias"
+            " WHERE s.claude_session_id = ? AND s.id != ? AND a.provisional = 0"
+            " AND a.retired_at IS NULL AND a.role IS NOT NULL AND a.client = ?"
+            " AND a.project = ? ORDER BY s.started_at DESC LIMIT 1",
+            (claude_session_id, self.session_id, self.client, self.project),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return self.set_role(row["role"])
+        except MailboxError:
+            return None  # e.g. live elsewhere: stay provisional
 
     # identity changes
 
@@ -377,6 +449,9 @@ class Identity:
             return None
         try:
             return self.set_role(row["pending_role"], row["pending_purpose"])
+        except MailboxError as exc:
+            # The owner's request failed; that must not fail the agent's own tool call.
+            return {"requested_role": row["pending_role"], "error": str(exc)}
         finally:
             with tx(self.conn):
                 self.conn.execute(
@@ -433,7 +508,7 @@ class Identity:
                 else:
                     self.conn.execute(
                         "UPDATE agents SET role = ?, purpose = COALESCE(?, purpose),"
-                        " last_seen_at = ? WHERE alias = ?",
+                        " provisional = 0, last_seen_at = ? WHERE alias = ?",
                         (role, purpose, t, target),
                     )
                     result["action"] = "resumed"
@@ -458,6 +533,10 @@ class Identity:
                             f"{left} open item(s) stay with {old!r}; a session that sets that "
                             "role again will pick them up"
                         )
+                    result["warnings"].append(
+                        f"replies to messages you sent as {old!r} will go to {old!r}, "
+                        "not to this session"
+                    )
                 self.conn.execute(
                     "UPDATE sessions SET alias = ? WHERE id = ?", (target, self.session_id)
                 )

@@ -21,6 +21,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Tests run under some real client (often Claude Code); identity must come from the
     # env each test passes, not from the process tree of the test runner.
     monkeypatch.setattr("agent_mailbox.procs.nearest_named", lambda *a, **k: None)
+    monkeypatch.setattr("agent_mailbox.procs.count_named", lambda *a, **k: 0)
     return state
 
 

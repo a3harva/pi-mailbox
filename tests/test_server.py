@@ -150,6 +150,15 @@ def test_wait_returns_on_new_mail_and_times_out(root, project):
             r = await call(a, "wait", timeout_seconds=20)
             assert not r["timed_out"] and r["messages"][0]["subject"] == "ping"
             assert time.monotonic() - t0 < 4
+            # Mail that landed before the call (a fast reply) must not be slept through,
+            # and is not reported twice.
+            owner(root, "send", "--to", me, "--subject", "early", "--body", "x")
+            t0 = time.monotonic()
+            r = await call(a, "wait", timeout_seconds=20)
+            assert [m["subject"] for m in r["messages"]] == ["early"]
+            assert time.monotonic() - t0 < 2
+            assert (await call(a, "wait", timeout_seconds=1))["timed_out"]
+            assert "thread_id" in (await call(a, "wait", thread_id="not-a-thread"))["error"]
 
     asyncio.run(go())
 

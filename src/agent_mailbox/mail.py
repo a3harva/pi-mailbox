@@ -83,6 +83,41 @@ class Sender:
     via: str  # 'mcp' | 'cli'
 
 
+def clean_subject(subject: str) -> str:
+    """One printable line: a subject is shown in digests, terminals and tool results."""
+    return "".join(ch for ch in " ".join(subject.split()) if ch.isprintable())
+
+
+def _open_count(conn: sqlite3.Connection, alias: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM deliveries WHERE to_alias = ? AND state != 'closed'", (alias,)
+    ).fetchone()[0]
+
+
+def _by_role(conn: sqlite3.Connection, sender: str, name: str) -> str | None:
+    """The durable alias a bare role name (e.g. 'reviewer') means, if exactly one fits.
+
+    Every real alias is ``<client>-<project>-<role>``, so a name that is nobody's alias
+    but is somebody's role could never be claimed; agents still write it that way.
+    Several matches are narrowed to the sender's project before giving up.
+    """
+    rows = conn.execute(
+        "SELECT alias, project FROM agents WHERE role = ? AND provisional = 0"
+        " AND retired_at IS NULL AND renamed_to IS NULL AND alias NOT IN (?, ?)",
+        (name, OWNER, sender),
+    ).fetchall()
+    if len(rows) > 1:
+        mine = conn.execute("SELECT project FROM agents WHERE alias = ?", (sender,)).fetchone()
+        local = [r for r in rows if mine is not None and r["project"] == mine["project"]]
+        if len(local) != 1:
+            listed = ", ".join(sorted(r["alias"] for r in rows))
+            raise MailboxError(
+                f"{name!r} is the role of several agents; use a full alias: {listed}"
+            )
+        rows = local
+    return rows[0]["alias"] if rows else None
+
+
 def _resolve_recipients(
     conn: sqlite3.Connection, root: Path, sender: str, to: str | list[str]
 ) -> tuple[list[str], list[str]]:
@@ -96,6 +131,13 @@ def _resolve_recipients(
         names = [r["alias"] for r in rows if not r["provisional"] or is_live(root, r["alias"])]
         if not names:
             raise MailboxError("no other agents to broadcast to")
+        # One agent that is not keeping up must not stop a broadcast to everyone else.
+        full = [n for n in names if _open_count(conn, n) >= LIMITS.open_per_recipient]
+        if full:
+            warnings.append(f"skipped (inbox full): {', '.join(sorted(full))}")
+            names = [n for n in names if n not in full]
+            if not names:
+                raise MailboxError("every other agent's inbox is full")
         return sorted(names), warnings
     raw = [to] if isinstance(to, str) else list(to)
     if not raw:
@@ -110,10 +152,20 @@ def _resolve_recipients(
         final, row = resolve_alias(conn, name)
         if row is not None and row["retired_at"]:
             raise MailboxError(f"alias {final!r} is retired; it no longer receives mail")
-        if row is None:
+        if row is None and (by_role := _by_role(conn, sender, name)):
+            warnings.append(
+                f"{name!r} is not an alias; delivered to {by_role!r}, which has that role"
+            )
+            final = by_role
+        elif row is None:
             warnings.append(
                 f"{name!r} has never been seen; the message is queued for whoever claims "
-                "that alias (check the name for typos)"
+                "that alias (check the name for typos, or list addresses with `agents`)"
+            )
+        elif row["provisional"] and not row["renamed_to"] and not is_live(root, final):
+            raise MailboxError(
+                f"{final!r} was the temporary address of a session that has ended; nothing "
+                "will ever read mail sent there. List current addresses with `agents`"
             )
         elif final != name:
             warnings.append(f"{name!r} was renamed; delivered to {final!r}")
@@ -136,8 +188,9 @@ def send(
     ttl_seconds: int | None = None,
     keep_open: bool = False,
 ) -> dict[str, Any]:
-    if not isinstance(subject, str) or not subject.strip():
+    if not isinstance(subject, str) or not clean_subject(subject):
         raise MailboxError("subject must be a non-empty string")
+    subject = clean_subject(subject)
     if len(subject) > LIMITS.subject_chars:
         raise MailboxError(f"subject is longer than {LIMITS.subject_chars} characters")
     if not isinstance(body, str):
@@ -187,10 +240,7 @@ def send(
                     f"(max {LIMITS.thread_hops}); stop the back-and-forth or start a new thread"
                 )
         for name in recipients:
-            open_n = conn.execute(
-                "SELECT COUNT(*) FROM deliveries WHERE to_alias = ? AND state != 'closed'",
-                (name,),
-            ).fetchone()[0]
+            open_n = _open_count(conn, name)
             if open_n >= LIMITS.open_per_recipient:
                 raise MailboxError(
                     f"{name!r} already has {open_n} open messages "
@@ -240,6 +290,9 @@ def send(
         result["expires_at"] = iso(t + ttl_seconds)
     if reply_to is not None:
         result["closed_original"] = closed_original
+    offline = [n for n in recipients if n != OWNER and not is_live(root, n)]
+    if offline:  # not an error: a later session that takes the role inherits the mail
+        result["offline"] = offline
     if warnings:
         result["warnings"] = warnings
     return result
@@ -317,13 +370,7 @@ def inbox(
             groups["deferred"].append(_header(r, t))
         else:
             groups["read_open"].append(_header(r, t))
-    if surfaced:  # listing a message counts as surfacing it
-        with tx(conn):
-            conn.executemany(
-                "UPDATE deliveries SET state = 'surfaced', surfaced_at = ?"
-                " WHERE message_id = ? AND to_alias = ? AND state = 'new'",
-                [(t, mid, alias) for mid in surfaced],
-            )
+    mark_surfaced(conn, alias, surfaced)  # listing a message counts as surfacing it
     result: dict[str, Any] = {"alias": alias, **groups}
     if include_closed:
         closed = conn.execute(
@@ -383,6 +430,21 @@ def resolve_id(conn: sqlite3.Connection, alias: str, given: object) -> str:
     if len(rows) > 1 and not any(r["id"] == given for r in rows):
         raise MailboxError(f"id fragment {given!r} matches several messages; use more of it")
     return rows[0]["id"] if len(rows) == 1 else given
+
+
+def resolve_thread(conn: sqlite3.Connection, alias: str, given: object) -> str:
+    """The thread of a message ``alias`` sent or received, from that message's id (or a
+    fragment). A thread's id is its first message's id, so a thread id works too."""
+    message_id = resolve_id(conn, alias, given)
+    row = conn.execute(
+        "SELECT m.thread_id FROM messages m WHERE (m.id = ? OR m.thread_id = ?) AND"
+        " (m.from_alias = ? OR EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id"
+        " AND d.to_alias = ?)) LIMIT 1",
+        (message_id, message_id, alias, alias),
+    ).fetchone()
+    if row is None:
+        raise MailboxError(f"thread_id {given!r} is not a message you sent or received")
+    return row["thread_id"]
 
 
 def read(conn: sqlite3.Connection, alias: str, message_id: str) -> dict[str, Any]:
@@ -508,7 +570,9 @@ def close(
     return {"id": message_id, "closed": True, "already_closed": False, "resolution": resolution}
 
 
-def status(conn: sqlite3.Connection, alias: str, message_id: str) -> dict[str, Any]:
+def status(
+    conn: sqlite3.Connection, alias: str, message_id: str, root: Path | None = None
+) -> dict[str, Any]:
     message_id = resolve_id(conn, alias, message_id)
     msg = conn.execute(
         "SELECT * FROM messages WHERE id = ? AND from_alias = ?", (message_id, alias)
@@ -521,6 +585,8 @@ def status(conn: sqlite3.Connection, alias: str, message_id: str) -> dict[str, A
     recipients = []
     for r in rows:
         item: dict[str, Any] = {"to": r["to_alias"], "state": r["state"]}
+        if root is not None and r["state"] != "closed" and r["to_alias"] != OWNER:
+            item["live"] = is_live(root, r["to_alias"])
         if r["read_at"]:
             item["read_at"] = iso(r["read_at"])
         if r["state"] == "deferred":
@@ -551,14 +617,28 @@ def summary_line(conn: sqlite3.Connection, alias: str) -> str:
     return f"{line} · {new} new · {len(rows)} total"
 
 
-def latest_activity(conn: sqlite3.Connection, alias: str, since: float, thread_id: str | None):
-    """New deliveries for ``alias`` created after ``since`` (optionally only in a thread)."""
-    sql = OPEN_SQL + " AND m.created_at > ?"
-    params: tuple[Any, ...] = (alias, since)
+def unseen(conn: sqlite3.Connection, alias: str, thread_id: str | None) -> list[sqlite3.Row]:
+    """Deliveries for ``alias`` that nothing has shown the agent yet (optionally only in a
+    thread). Unlike a "created after" test this cannot miss mail that landed just before
+    the caller started waiting, or whose sender's clock or commit ran late."""
+    sql = OPEN_SQL + " AND d.state = 'new'"
+    params: tuple[Any, ...] = (alias,)
     if thread_id:
         sql += " AND m.thread_id = ?"
         params += (thread_id,)
     return conn.execute(sql + " ORDER BY m.created_at", params).fetchall()
+
+
+def mark_surfaced(conn: sqlite3.Connection, alias: str, ids: list[str]) -> None:
+    if not ids:
+        return
+    t = now()
+    with tx(conn):
+        conn.executemany(
+            "UPDATE deliveries SET state = 'surfaced', surfaced_at = ?"
+            " WHERE message_id = ? AND to_alias = ? AND state = 'new'",
+            [(t, mid, alias) for mid in ids],
+        )
 
 
 def header_of(row: sqlite3.Row) -> dict[str, Any]:

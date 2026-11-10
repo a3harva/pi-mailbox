@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,13 +20,15 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-HOOK_MARK = "agent-mailbox hook claude"
+# The command may be shell-quoted (a path with spaces), which puts a quote after the name.
+HOOK_MARK = re.compile(r"agent-mailbox['\"]?\s+hook\s+claude\b")
 SERVER_NAME = "agent-mailbox"
 HOOK_EVENTS = {
     "SessionStart": "session-start",
     "UserPromptSubmit": "user-prompt-submit",
     "PostToolUse": "post-tool-use",
     "Stop": "stop",
+    "StopFailure": "stop-failure",
 }
 HOOK_TIMEOUT = 5
 
@@ -69,7 +72,7 @@ def _dump(data: dict[str, Any]) -> str:
 
 
 def _is_ours(hook: Any) -> bool:
-    return isinstance(hook, dict) and HOOK_MARK in str(hook.get("command", ""))
+    return isinstance(hook, dict) and bool(HOOK_MARK.search(str(hook.get("command", ""))))
 
 
 def _strip_ours(data: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +121,8 @@ def with_hooks(data: dict[str, Any], command: list[str]) -> dict[str, Any]:
 
 
 def _write_atomic(path: Path, text: str) -> None:
+    if path.is_symlink():  # e.g. dotfiles kept in a repo: replace the target, keep the link
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")

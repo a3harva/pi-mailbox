@@ -120,8 +120,11 @@ export default function agentMailbox(pi: ExtensionAPI) {
 	let polling = false;
 
 	const hook = async (event: string, data: Record<string, unknown> = {}, timeoutMs?: number) => {
+		// Taken before the hook runs: a write that lands while it runs must still count as
+		// news. The hook's own writes cost at most one extra check.
+		const before = dbSignature(dir);
 		const reply = await runHook(command, event, data, timeoutMs);
-		seen = dbSignature(dir); // our own writes are not news
+		seen = before;
 		return reply;
 	};
 

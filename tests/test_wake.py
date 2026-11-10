@@ -82,3 +82,34 @@ def test_missing_pane_fails_open(make_ident, conn, root):
         conn.execute("UPDATE sessions SET turn_state='idle' WHERE id=?", (a.session_id,))
     result = wake.maybe_wake(conn, root, [a.alias], "urgent")
     assert result[0]["woke"] is False
+
+
+def test_idle_again_is_woken_again_inside_the_debounce(make_ident, conn, root):
+    # Woken, did the work in a few seconds, went idle: the next message must wake it too.
+    a = make_ident(pane="%1")
+    with tx(conn):
+        conn.execute("UPDATE sessions SET turn_state='idle' WHERE id=?", (a.session_id,))
+    with mock.patch.object(wake, "type_into_pane") as typed:
+        assert wake.maybe_wake(conn, root, [a.alias], "normal")[0]["woke"] is True
+        assert wake.maybe_wake(conn, root, [a.alias], "normal")[0]["reason"] == "debounced"
+        with tx(conn):  # the turn that wake-up started has come and gone
+            conn.execute(
+                "UPDATE sessions SET claude_hooks_seen_at = last_wake_at + 1 WHERE id=?",
+                (a.session_id,),
+            )
+        assert wake.maybe_wake(conn, root, [a.alias], "normal")[0]["woke"] is True
+        assert typed.call_count == 2
+
+
+def test_interrupted_session_is_not_busy_forever(make_ident, conn, root):
+    assert wake.should_wake("busy", "urgent", wake.BUSY_STALE_SECONDS + 1) is True
+    assert wake.should_wake("busy", "normal", wake.BUSY_STALE_SECONDS + 1) is False
+    assert wake.should_wake("busy", "urgent", 10) is False
+    a = make_ident(pane="%1")
+    with tx(conn):
+        conn.execute(
+            "UPDATE sessions SET turn_state='busy', claude_hooks_seen_at=? WHERE id=?",
+            (time.time() - 3600, a.session_id),
+        )
+    with mock.patch.object(wake, "type_into_pane"):
+        assert wake.maybe_wake(conn, root, [a.alias], "urgent")[0]["woke"] is True

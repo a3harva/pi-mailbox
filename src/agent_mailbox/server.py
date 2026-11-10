@@ -177,35 +177,43 @@ def build_server(ident: Identity) -> MCPServer:
     @server.tool()
     async def status(ctx: Context, id: str) -> dict[str, Any]:
         """For a message you sent: each recipient's state, defer note and resolution."""
-        return call(ctx, lambda: mail.status(conn, ident.alias, id))
+        return call(ctx, lambda: mail.status(conn, ident.alias, id, root))
 
     @server.tool()
     async def wait(
         ctx: Context, timeout_seconds: int = 60, thread_id: str | None = None
     ) -> dict[str, Any]:
-        """Block until new mail arrives (or a reply in `thread_id`), up to 300 seconds."""
+        """Block until new mail arrives (or a reply in `thread_id`), up to 300 seconds.
+
+        Returns at once if mail you have not been shown yet is already waiting. `thread_id`
+        accepts the id of any message in the thread, e.g. the one you sent.
+        """
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, int)
             or not 1 <= timeout_seconds <= WAIT_MAX
         ):
             raise ToolError(f"timeout_seconds must be an integer from 1 to {WAIT_MAX}")
-        since = now()
-        deadline = since + timeout_seconds
+        if thread_id is not None:
+            try:
+                thread_id = mail.resolve_thread(conn, ident.alias, thread_id)
+            except MailboxError as exc:
+                raise ToolError(str(exc)) from None
+        deadline = now() + timeout_seconds
         version = None
         while True:
             current = conn.execute("PRAGMA data_version").fetchone()[0]
             if current != version:
                 version = current
-                rows = mail.latest_activity(conn, ident.alias, since, thread_id)
+                rows = mail.unseen(conn, ident.alias, thread_id)
                 if rows:
-                    return call(
-                        ctx,
-                        lambda rows=rows: {
-                            "timed_out": False,
-                            "messages": [mail.header_of(r) for r in rows],
-                        },
-                    )
+
+                    def found(rows=rows) -> dict[str, Any]:
+                        headers = [mail.header_of(r) for r in rows]
+                        mail.mark_surfaced(conn, ident.alias, [r["message_id"] for r in rows])
+                        return {"timed_out": False, "messages": headers}
+
+                    return call(ctx, found)
             if now() >= deadline:
                 return call(ctx, lambda: {"timed_out": True, "messages": []})
             await asyncio.sleep(POLL_SECONDS)
@@ -237,6 +245,8 @@ def serve() -> int:
             ident.set_role(role)
         except MailboxError as exc:
             print(f"agent-mailbox: AGENT_MAILBOX_ROLE={role!r} not applied: {exc}", file=sys.stderr)
+    elif ident.client == "claude-code":
+        ident.resume_previous_role(os.environ.get("CLAUDE_CODE_SESSION_ID"))
     print(
         f"agent-mailbox: session {ident.session_id} serving as {ident.alias!r} from {root}",
         file=sys.stderr,

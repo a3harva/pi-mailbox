@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sqlite3
 import sys
 from typing import Any
 
@@ -15,11 +16,16 @@ from .hooks import EVENTS, PI_EVENTS
 from .paths import UnsafeStateDir, state_dir
 
 
+def _printable(text: str) -> str:
+    """Drop control characters: agents write this text, and a terminal would obey them."""
+    return "".join(ch for ch in text if ch in "\n\t" or ch.isprintable())
+
+
 def _emit(data: Any, as_json: bool, text: str | None = None) -> None:
     if as_json or text is None:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
-        print(text)
+        print(_printable(text))
 
 
 def _inbox_text(result: dict[str, Any]) -> str:
@@ -201,8 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _alias(args: argparse.Namespace) -> str:
     if args.as_alias:
+        from .identity import validate_alias
+
         print(f"agent-mailbox: acting as {args.as_alias!r} (debugging)", file=sys.stderr)
-        return args.as_alias
+        return validate_alias(args.as_alias)
     return OWNER
 
 
@@ -258,7 +266,7 @@ def _owner(conn, root, args: argparse.Namespace) -> tuple[Any, str | None]:
             return mail.close(conn, me, args.id, args.resolution, args.note), None
         case "status":
             if args.id:
-                return mail.status(conn, me, args.id), None
+                return mail.status(conn, me, args.id, root), None
             data = dashboard(conn, root, args.overdue_only)
             return data, _dashboard_text(data)
         case "agents":
@@ -319,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             result, text = _owner(conn, root, args)
         finally:
             conn.close()
-    except (MailboxError, UnsafeStateDir, OSError) as exc:
+    except (MailboxError, UnsafeStateDir, OSError, UnicodeError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 1
     _emit(result, args.json, text)

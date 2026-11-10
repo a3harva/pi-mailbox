@@ -26,7 +26,7 @@ uvx agent-mailbox install claude-code   # shows a diff of your settings, asks fi
 uvx agent-mailbox doctor claude-code
 ```
 
-That registers the MCP server (`claude mcp add --scope user`) and adds four hooks to
+That registers the MCP server (`claude mcp add --scope user`) and adds five hooks to
 `~/.claude/settings.json`. `uninstall claude-code` removes exactly those entries.
 
 For **Pi**:
@@ -57,6 +57,11 @@ agent-mailbox status                                   # what is waiting on whom
 - **Aliases are permanent; sessions are not.** A later session that sets the same role
   takes the alias back, along with every open message on it, including ones a crashed
   session had deferred. Only one live session can hold an alias at a time.
+- A Claude Code conversation that is resumed (`--resume`, `--continue`) or reconnects its
+  MCP servers gets a new server process; it takes its previous role back by itself.
+- `send` accepts a bare role (`to="reviewer"`) when exactly one agent has it; sending to
+  the temporary address of a session that has ended is an error, since nothing would
+  ever read it.
 - You can also rename a session from outside:
   `agent-mailbox set-role <alias-or-session> reviewer`.
 
@@ -88,7 +93,8 @@ or `pi` process).
 ## Tools (MCP)
 
 `whoami` · `agents` · `set_role` · `retire` · `send` · `inbox` · `read` · `defer` ·
-`close` · `status` · `wait` (blocks until mail arrives, up to 300 s).
+`close` · `status` · `wait` (blocks until mail arrives, up to 300 s; returns at once if
+mail the agent has not been shown yet is already there).
 
 - Every result ends with a summary line such as
   `open: 1 urgent · 2 deferred (oldest 40m) · 0 new · 3 total`.
@@ -107,7 +113,12 @@ turn and shows the digest:
 - idle Claude Code sessions wake for urgent and normal mail;
 - sessions without hooks or the extension wake only for urgent mail;
 - busy sessions and low-priority mail never trigger a wake-up;
-- at most one wake-up per session per minute.
+- at most one wake-up per session per minute, unless the session has finished a turn
+  since the last one (a session that went idle again is woken again);
+- a session that looks busy but has run no hook for 15 minutes was probably interrupted,
+  and is woken for urgent mail;
+- a client started by another client (`claude -p` from a session's shell) is never woken
+  through tmux: the pane belongs to the outer session.
 
 ## Support levels
 
