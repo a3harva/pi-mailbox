@@ -280,3 +280,30 @@ def test_first_deferral_resets_guard_but_redeferral_does_not(make_ident, owner_s
     mail.defer(conn, a.alias, m["id"], note="still busy")  # no reset this time
     assert is_block(run("stop", root))
     assert run("stop", root) is None  # guard: two blocks since the first deferral
+
+
+def test_compaction_keeps_the_turn_busy_and_api_failure_ends_it(make_ident, conn, root):
+    a = make_ident(claude_sid="c1")
+    state = "SELECT turn_state FROM sessions WHERE id = ?"
+    run("user-prompt-submit", root)
+    assert "mailbox address" in ctx_text(run("session-start", root, source="compact"))
+    assert conn.execute(state, (a.session_id,)).fetchone()[0] == "busy"
+    assert run("stop-failure", root, error="rate_limit") is None
+    assert conn.execute(state, (a.session_id,)).fetchone()[0] == "idle"
+    run("session-start", root, source="startup")
+    assert conn.execute(state, (a.session_id,)).fetchone()[0] == "idle"
+
+
+def test_tool_calls_keep_a_heartbeat(make_ident, conn, root):
+    a = make_ident(claude_sid="c1")
+    seen = "SELECT turn_state, claude_hooks_seen_at FROM sessions WHERE id = ?"
+    run("user-prompt-submit", root)
+    with tx(conn):
+        conn.execute("UPDATE sessions SET claude_hooks_seen_at = ?", (now() - 3600,))
+    run("post-tool-use", root)
+    row = conn.execute(seen, (a.session_id,)).fetchone()
+    assert row[0] == "busy" and now() - row[1] < 5
+
+
+def test_clean_drops_control_and_invisible_characters():
+    assert hooks.clean("a\x1b[2Jb\u202ec\u200bd\x00") == "a[2Jbcd"

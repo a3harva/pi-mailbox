@@ -91,3 +91,13 @@ def test_set_role_and_retire_commands(make_ident, root):
     assert a.apply_pending_role()["alias"].endswith("-reviewer")
     a.end()
     assert cli("retire", a.alias)[0] == 0
+
+
+def test_text_output_cannot_drive_the_terminal_and_as_is_validated(make_ident, conn, root):
+    a = make_ident()
+    mail.send(conn, root, mail.Sender(a.alias, None, "mcp"), "owner", "s", "red\x1b[31m\x07")
+    mid = json.loads(cli("inbox", "--json")[1])["new"][0]["id"]
+    code, out, _ = cli("read", mid)
+    assert code == 0 and "\x1b" not in out and "\x07" not in out and "red[31m" in out
+    code, _, err = cli("inbox", "--as", "Not An Alias\n")
+    assert code == 1 and "invalid alias" in err

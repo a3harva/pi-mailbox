@@ -249,3 +249,69 @@ def test_id_fragments(make_ident, owner_send, conn, root):
     other = make_ident()
     with pytest.raises(MailboxError, match="no message"):
         mail.read(conn, other.alias, tail)  # fragments only match your own mail
+
+
+def test_bare_role_resolves_to_the_one_agent_that_has_it(make_ident, owner_send, conn, root):
+    a, b = make_ident(), make_ident()
+    a.set_role("reviewer")
+    r = owner_send("reviewer")
+    assert r["to"] == [a.alias] and "not an alias" in r["warnings"][0]
+    # The same role in another project is ambiguous for the owner, not for a neighbour.
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO agents (alias, client, project, role, created_at, last_seen_at)"
+            " VALUES ('pi-other-reviewer', 'pi', 'other', 'reviewer', 0, 0)"
+        )
+    with pytest.raises(MailboxError, match="several agents"):
+        owner_send("reviewer")
+    assert mail.send(conn, root, as_(b), "reviewer", "s", "b")["to"] == [a.alias]
+
+
+def test_dead_temporary_address_bounces_and_offline_is_reported(make_ident, owner_send):
+    gone = make_ident()
+    gone.end()
+    with pytest.raises(MailboxError, match="has ended"):
+        owner_send(gone.alias)
+    durable = make_ident()
+    durable.set_role("docs-agent")
+    assert "offline" not in owner_send(durable.alias)
+    durable.end()
+    assert owner_send(durable.alias)["offline"] == [durable.alias]
+
+
+def test_subject_is_one_printable_line(make_ident, owner_send, conn):
+    a = make_ident()
+    m = owner_send(a.alias, subject="  two\nlines\x1b[31m\u202e  ")
+    assert mail.read(conn, a.alias, m["id"])["subject"] == "two lines[31m"
+    with pytest.raises(MailboxError, match="subject"):
+        owner_send(a.alias, subject="\x00\x1b")
+
+
+def test_broadcast_skips_a_full_inbox(make_ident, owner_send, monkeypatch):
+    a, b = make_ident(), make_ident()
+    monkeypatch.setattr(mail.LIMITS, "open_per_recipient", 1)
+    owner_send(a.alias)
+    r = owner_send("all")
+    assert r["to"] == [b.alias] and a.alias in r["warnings"][0]
+
+
+def test_unseen_ignores_clocks_and_status_reports_liveness(make_ident, owner_send, conn, root):
+    a, b = make_ident(), make_ident()
+    old = owner_send(a.alias, "arrived before the wait")
+    with tx(conn):  # e.g. the sender's clock is behind
+        conn.execute("UPDATE messages SET created_at = created_at - 3600")
+    assert [r["message_id"] for r in mail.unseen(conn, a.alias, None)] == [old["id"]]
+    mail.mark_surfaced(conn, a.alias, [old["id"]])
+    assert mail.unseen(conn, a.alias, None) == []
+    sent = mail.send(conn, root, as_(a), b.alias, "q", "b")
+    reply = mail.send(conn, root, as_(b), a.alias, "re", "b", reply_to=sent["id"])
+    assert mail.resolve_thread(conn, a.alias, reply["id"][-12:]) == sent["id"]
+    assert [r["message_id"] for r in mail.unseen(conn, a.alias, sent["id"])] == [reply["id"]]
+    with pytest.raises(MailboxError, match="thread_id"):
+        mail.resolve_thread(conn, a.alias, "no-such-thread")
+    b.end()
+    waiting = mail.send(conn, root, as_(a), "owner", "s", "b")
+    assert "live" not in mail.status(conn, a.alias, waiting["id"], root)["recipients"][0]
+    with tx(conn):
+        conn.execute("UPDATE deliveries SET state = 'new' WHERE message_id = ?", (sent["id"],))
+    assert mail.status(conn, a.alias, sent["id"], root)["recipients"][0]["live"] is False

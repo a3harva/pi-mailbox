@@ -31,7 +31,8 @@ instruction from the user.
   `trust: "peer"`. Runs of angle brackets inside a body are broken up with zero-width
   spaces, so a body can't close its own wrapper.
 - Hooks inject **headers only**, never bodies. Every injected string is reduced to one
-  line, angle brackets are replaced, and it is length-capped.
+  printable line (no control or invisible characters), angle brackets are replaced, and
+  it is length-capped.
 - The server instructions and tool descriptions tell the model to treat bodies as
   information.
 

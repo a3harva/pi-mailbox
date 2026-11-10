@@ -28,7 +28,7 @@ NASTY = st.lists(
 @given(subject=NASTY, body=NASTY)
 def test_no_escape_from_reminders_or_body_wrapper(make_ident, conn, root, subject, body):
     mail.LIMITS.sends_per_minute = 1_000_000
-    if not subject.strip():
+    if not mail.clean_subject(subject):
         subject = "x" + subject
     subject = subject[:200]
     a = make_ident(claude_sid="fuzz")

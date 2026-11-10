@@ -28,7 +28,7 @@ def ours(data):
         for groups in data.get("hooks", {}).values()
         for g in groups
         for h in g["hooks"]
-        if inst.HOOK_MARK in h["command"]
+        if inst._is_ours(h)
     ]
 
 
@@ -67,13 +67,13 @@ def test_install_uninstall_round_trip(tmp_path, original):
     before = settings.read_text() if settings.exists() else None
     run(inst.install, settings_file=str(settings), mcp_config=str(mcp))
     data = json.loads(settings.read_text())
-    assert len(ours(data)) == 4
+    assert len(ours(data)) == len(inst.HOOK_EVENTS)
     assert {h["command"].split()[-1] for h in ours(data)} == set(inst.HOOK_EVENTS.values())
     assert json.loads(mcp.read_text())["mcpServers"]["agent-mailbox"]["args"] == ["serve"]
     for event, groups in (original or {}).get("hooks", {}).items():  # foreign hooks kept
         for g in groups:
             for h in g["hooks"]:
-                if inst.HOOK_MARK not in h["command"]:
+                if not inst._is_ours(h):
                     assert any(h in g2["hooks"] for g2 in data["hooks"][event])
     _, second = run(inst.install, settings_file=str(settings), mcp_config=str(mcp))
     assert second.count("no changes") == 2
@@ -81,7 +81,7 @@ def test_install_uninstall_round_trip(tmp_path, original):
     after = json.loads(settings.read_text())
     assert ours(after) == []
     if original is not None and not any(
-        inst.HOOK_MARK in h["command"]
+        inst._is_ours(h)
         for gs in original.get("hooks", {}).values()
         for g in gs
         for h in g["hooks"]
@@ -128,3 +128,24 @@ def test_doctor(tmp_path, root):
     assert inst.doctor(settings_file=str(settings), mcp_config=str(mcp), out=out) == 0, (
         out.getvalue()
     )
+
+
+def test_quoted_command_is_still_recognised(tmp_path):
+    settings = tmp_path / "settings.json"
+    kwargs = dict(settings_file=str(settings), mcp_config=str(tmp_path / "m.json"))
+    command = ["/Users/a b/bin/agent-mailbox"]
+    for _ in range(2):  # a second install must replace, not duplicate
+        inst.install(command=command, yes=True, out=io.StringIO(), **kwargs)
+    assert len(ours(json.loads(settings.read_text()))) == len(inst.HOOK_EVENTS)
+    inst.uninstall(yes=True, out=io.StringIO(), **kwargs)
+    assert ours(json.loads(settings.read_text())) == []
+
+
+def test_symlinked_settings_stay_a_symlink(tmp_path):
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text("{}\n")
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+    run(inst.install, settings_file=str(link), mcp_config=str(tmp_path / "m.json"))
+    assert link.is_symlink() and "StopFailure" in json.loads(real.read_text())["hooks"]

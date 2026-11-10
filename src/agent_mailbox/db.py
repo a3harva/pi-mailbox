@@ -110,15 +110,16 @@ def db_path(root: Path | None = None) -> Path:
     return (root or state_dir()) / DB_NAME
 
 
-def connect(root: Path | None = None) -> sqlite3.Connection:
+def connect(root: Path | None = None, *, busy_seconds: float = 10) -> sqlite3.Connection:
     root = ensure_private_dir(root or state_dir())
     ensure_private_dir(root / "locks")
     path = root / DB_NAME
     if not path.exists():
         os.close(open_private_file(path))
-    conn = sqlite3.connect(path, timeout=10, isolation_level=None, check_same_thread=False)
+    conn = sqlite3.connect(
+        path, timeout=busy_seconds, isolation_level=None, check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -156,6 +157,7 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:  # SQLite rolls back by itself on some errors
+            conn.execute("ROLLBACK")
         raise
     conn.execute("COMMIT")

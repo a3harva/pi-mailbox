@@ -57,6 +57,17 @@ def nearest_named(
     return None
 
 
+def count_named(
+    names: dict[str, str], pid: int | None = None, table: dict[int, tuple[int, str]] | None = None
+) -> int:
+    """How many ancestors have a command name in ``names`` (0 if the table is unreadable)."""
+    try:
+        table = table if table is not None else process_table()
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    return sum(1 for a in ancestors(pid, table) if table.get(a, (0, ""))[1] in names)
+
+
 def client_pid(
     pid: int | None = None, table: dict[int, tuple[int, str]] | None = None
 ) -> int | None:

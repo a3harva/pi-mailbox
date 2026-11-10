@@ -250,3 +250,85 @@ def test_stale_sessions_reconciled(make_ident, conn, root):
     row = conn.execute("SELECT ended_at FROM sessions WHERE id=?", (sid,)).fetchone()
     assert row["ended_at"] is not None
     c2.close()
+
+
+def test_reconcile_spares_starting_and_renamed_sessions(make_ident, conn, root):
+    from agent_mailbox.identity import reconcile_stale_sessions
+
+    a = make_ident()
+    # A server that has inserted its row but not bound an alias yet must not be ended.
+    with tx(conn):
+        conn.execute("UPDATE sessions SET alias = NULL WHERE id = ?", (a.session_id,))
+    reconcile_stale_sessions(conn, root)
+    ended = "SELECT ended_at FROM sessions WHERE id = ?"
+    assert conn.execute(ended, (a.session_id,)).fetchone()[0] is None
+    with tx(conn):
+        conn.execute("UPDATE sessions SET started_at = started_at - 3600")
+    reconcile_stale_sessions(conn, root)
+    assert conn.execute(ended, (a.session_id,)).fetchone()[0] is not None
+    # A wrongly ended live session heals itself on its next tool call.
+    with tx(conn):
+        conn.execute("UPDATE sessions SET alias = ? WHERE id = ?", (a.alias, a.session_id))
+    a.touch()
+    assert conn.execute(ended, (a.session_id,)).fetchone()[0] is None
+
+
+def test_lock_survives_a_liveness_probe(root, conn):
+    import fcntl
+    import threading
+
+    fd = acquire_lock(root, "p-q-r", "first")
+    os.close(fd)
+    probe = os.open(root / "locks" / "p-q-r.lock", os.O_RDONLY)
+    fcntl.flock(probe, fcntl.LOCK_SH)  # what is_live holds for an instant
+    threading.Timer(0.03, os.close, args=(probe,)).start()
+    fd = acquire_lock(root, "p-q-r", "second")
+    assert fd is not None
+    os.close(fd)
+
+
+def test_reserved_role_and_resuming_a_dead_temporary_name(make_ident, conn, root):
+    dead = make_ident()
+    tail = dead.alias.rsplit("-", 1)[1]
+    dead.end()
+    s = make_ident()
+    with pytest.raises(MailboxError, match="reserved"):
+        s.set_role("owner")
+    s.set_role(tail)  # a role that spells a dead session's temporary alias
+    row = conn.execute("SELECT provisional FROM agents WHERE alias = ?", (s.alias,)).fetchone()
+    assert s.alias == dead.alias and row["provisional"] == 0
+
+
+def test_same_conversation_takes_its_role_back(make_ident, owner_send, conn, root):
+    first = make_ident(claude_sid="conv-1")
+    first.set_role("refactor-agent")
+    durable = first.alias
+    owner_send(durable, "waiting")
+    first.end()
+    again = make_ident(claude_sid="conv-1")  # resumed conversation, new server
+    assert again.provisional
+    assert again.resume_previous_role("conv-1")["inherited_open"] == 1
+    assert again.alias == durable
+    other = make_ident(claude_sid="conv-2")
+    assert other.resume_previous_role("conv-2") is None and other.provisional
+    # While the role is live elsewhere the newcomer stays provisional.
+    twin = make_ident(claude_sid="conv-1")
+    assert twin.resume_previous_role("conv-1") is None and twin.provisional
+
+
+def test_failed_owner_role_request_does_not_raise(make_ident, conn, root):
+    from agent_mailbox.identity import request_role
+
+    holder, s = make_ident(), make_ident()
+    holder.set_role("reviewer")
+    request_role(conn, root, s.alias, "reviewer", None)
+    applied = s.apply_pending_role()
+    assert "in use" in applied["error"] and s.provisional
+    assert s.apply_pending_role() is None  # cleared, not retried forever
+
+
+def test_nested_client_does_not_record_the_outer_pane(make_ident, conn, monkeypatch):
+    monkeypatch.setattr("agent_mailbox.procs.count_named", lambda *a, **k: 2)
+    s = make_ident(pane="%7")
+    row = conn.execute("SELECT tmux_pane FROM sessions WHERE id = ?", (s.session_id,)).fetchone()
+    assert row["tmux_pane"] is None
