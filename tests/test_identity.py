@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_mailbox import mail
+from agent_mailbox import mail, procs
 from agent_mailbox.db import connect, now, tx
 from agent_mailbox.errors import MailboxError
 from agent_mailbox.identity import (
@@ -18,6 +18,7 @@ from agent_mailbox.identity import (
     acquire_lock,
     cleanup_provisional,
     detect_client,
+    env_marked_clients,
     is_live,
     list_agents,
     make_alias,
@@ -32,6 +33,52 @@ def test_detect_client():
     assert detect_client({}) == "mcp"
     assert detect_client({}, "claude-code") == "claude-code"
     assert detect_client({}, "Some Client") == "some-client"
+
+
+def test_env_marker_beats_ancestor_name(monkeypatch, make_ident):
+    """A process named "pi" above us must not hijack a session that says CLAUDECODE=1.
+
+    Reproduces the review finding: any ancestor whose program name is "pi" or "claude"
+    used to override the client's own marker variables.
+    """
+    monkeypatch.setattr(procs, "nearest_named", lambda *a, **k: "pi")
+    monkeypatch.setattr(procs, "count_named", lambda *a, **k: 1)
+    a = make_ident(env={"CLAUDECODE": "1"})
+    assert a.client == "claude-code"
+    assert a.alias.startswith("claude-code-")
+
+
+def test_no_marker_falls_back_to_ancestry(monkeypatch, make_ident):
+    monkeypatch.setattr(procs, "nearest_named", lambda *a, **k: "pi")
+    monkeypatch.setattr(procs, "count_named", lambda *a, **k: 1)
+    a = make_ident(env={})
+    assert a.client == "pi"
+    assert a.alias.startswith("pi-")
+
+
+def test_nested_client_uses_ancestry_to_disambiguate(monkeypatch, make_ident):
+    """Two markers means a client inside another one, which inherited the outer client's
+    variables; the nearest client process (the inner one) decides."""
+    for nearest, expected in (("pi", "pi"), ("claude-code", "claude-code")):
+        def fake_nearest(*a, _names=None, _pid=None, _table=None, _n=nearest):
+            return _n
+
+        monkeypatch.setattr(procs, "nearest_named", fake_nearest)
+        monkeypatch.setattr(procs, "count_named", lambda *a, **k: 2)
+        a = make_ident(env={"CLAUDECODE": "1", "PI_CODING_AGENT": "1"})
+        assert a.client == expected
+        assert a.alias.startswith(f"{expected}-")
+
+
+def test_env_marked_clients():
+    assert env_marked_clients({}) == set()
+    assert env_marked_clients({"CLAUDECODE": "1"}) == {"claude-code"}
+    assert env_marked_clients({"CLAUDE_CODE_SESSION_ID": "x"}) == {"claude-code"}
+    assert env_marked_clients({"PI_CODING_AGENT": "1"}) == {"pi"}
+    assert env_marked_clients({"CLAUDECODE": "1", "PI_CODING_AGENT": "1"}) == {
+        "claude-code",
+        "pi",
+    }
 
 
 def test_alias_length_cap():

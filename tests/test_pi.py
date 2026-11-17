@@ -48,13 +48,30 @@ def test_nearest_named_picks_the_innermost_client():
 
 
 def test_pi_session_never_records_an_inherited_claude_session_id(make_ident, conn, monkeypatch):
+    # Pi started from a Claude Code shell: Pi's own marker plus the inherited Claude Code
+    # one are both set, so ancestry decides; the inherited claude session id must never
+    # be recorded for the Pi session (Claude Code hooks would bind to it otherwise).
     monkeypatch.setattr("agent_mailbox.procs.nearest_named", lambda *a, **k: "pi")
-    ident = make_ident(claude_sid="outer-claude")  # env says Claude Code, process says Pi
+    ident = make_ident(
+        env={"CLAUDE_CODE_SESSION_ID": "outer-claude", "PI_CODING_AGENT": "true"}
+    )
     row = conn.execute(
         "SELECT client, claude_session_id FROM sessions WHERE id = ?", (ident.session_id,)
     ).fetchone()
     assert (row["client"], row["claude_session_id"]) == ("pi", None)
     assert ident.alias.startswith("pi-my-proj-")
+
+
+def test_claude_under_pi_is_still_claude_code(make_ident, conn, monkeypatch):
+    # The mirror case: Claude Code started from a Pi shell inherits PI_CODING_AGENT;
+    # with both markers set ancestry must pick Claude Code, and its session id is kept.
+    monkeypatch.setattr("agent_mailbox.procs.nearest_named", lambda *a, **k: "claude-code")
+    ident = make_ident(env={"CLAUDE_CODE_SESSION_ID": "c-1", "PI_CODING_AGENT": "true"})
+    row = conn.execute(
+        "SELECT client, claude_session_id FROM sessions WHERE id = ?", (ident.session_id,)
+    ).fetchone()
+    assert (row["client"], row["claude_session_id"]) == ("claude-code", "c-1")
+    assert ident.alias.startswith("claude-code-my-proj-")
 
 
 def test_explicit_client_override(make_ident, monkeypatch):
