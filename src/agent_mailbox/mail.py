@@ -118,11 +118,15 @@ def _by_role(conn: sqlite3.Connection, sender: str, name: str) -> str | None:
     return rows[0]["alias"] if rows else None
 
 
+def _is_broadcast(to: str | list[str]) -> bool:
+    return to == BROADCAST or to == [BROADCAST]
+
+
 def _resolve_recipients(
     conn: sqlite3.Connection, root: Path, sender: str, to: str | list[str]
 ) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
-    if to == BROADCAST or to == [BROADCAST]:
+    if _is_broadcast(to):
         rows = conn.execute(
             "SELECT alias, provisional FROM agents WHERE retired_at IS NULL"
             " AND renamed_to IS NULL AND alias NOT IN (?, ?)",
@@ -206,6 +210,7 @@ def send(
     ):
         raise MailboxError(f"ttl_seconds must be an integer from 1 to {LIMITS.ttl_seconds}")
 
+    broadcast = _is_broadcast(to)
     recipients, warnings = _resolve_recipients(conn, root, sender.alias, to)
     if reply_to is not None:
         reply_to = resolve_id(conn, sender.alias, reply_to)
@@ -239,13 +244,28 @@ def send(
                     f"thread limit: this thread already has {hops} messages "
                     f"(max {LIMITS.thread_hops}); stop the back-and-forth or start a new thread"
                 )
+        # The pre-check may be stale by now: another send may have filled an inbox
+        # between it and this transaction. One agent that is not keeping up must not
+        # stop a broadcast to everyone else, so a newly full recipient is skipped with
+        # a warning, exactly like the pre-check. A direct send still fails loudly:
+        # the sender chose those recipients, and half a delivery would be worse.
+        deliverable: list[str] = []
+        newly_full: list[str] = []
         for name in recipients:
-            open_n = _open_count(conn, name)
-            if open_n >= LIMITS.open_per_recipient:
+            if _open_count(conn, name) >= LIMITS.open_per_recipient:
+                newly_full.append(name)
+            else:
+                deliverable.append(name)
+        if newly_full:
+            if not broadcast:
                 raise MailboxError(
-                    f"{name!r} already has {open_n} open messages "
-                    f"(max {LIMITS.open_per_recipient}); it is not keeping up"
+                    f"{newly_full[0]!r} already has {_open_count(conn, newly_full[0])} open "
+                    f"messages (max {LIMITS.open_per_recipient}); it is not keeping up"
                 )
+            warnings.append(f"skipped (inbox full): {', '.join(sorted(newly_full))}")
+            if not deliverable:
+                raise MailboxError("every other agent's inbox is full")
+        recipients = deliverable
         conn.execute(
             "INSERT INTO messages (id, thread_id, reply_to, from_alias, from_session, via,"
             " priority, expects_reply, subject, body, created_at, expires_at)"

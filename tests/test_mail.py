@@ -295,6 +295,69 @@ def test_broadcast_skips_a_full_inbox(make_ident, owner_send, monkeypatch):
     assert r["to"] == [b.alias] and a.alias in r["warnings"][0]
 
 
+def _racy_open_count(target: str, cap: int):
+    """A fake _open_count: each alias is under the cap the first time it is counted
+    (the pre-check) and at the cap every time after that (the in-tx re-check), which
+    is exactly what another sender filling the inbox mid-send looks like."""
+    real = mail._open_count
+    seen: set[str] = set()
+
+    def racy(conn, alias):
+        if alias == target and alias in seen:
+            return cap
+        seen.add(alias)
+        return real(conn, alias)
+
+    return racy
+
+
+def test_broadcast_survives_a_recipient_filling_up_mid_send(make_ident, owner_send, monkeypatch):
+    """The race: an inbox that fills between the pre-check and the transaction is
+    skipped with a warning, not a dead broadcast."""
+    a, b = make_ident(), make_ident()
+    monkeypatch.setattr(mail.LIMITS, "open_per_recipient", 1)
+    monkeypatch.setattr(mail, "_open_count", _racy_open_count(a.alias, 1))
+    r = owner_send("all")
+    assert r["to"] == [b.alias]
+    assert a.alias in r["warnings"][-1] and "skipped (inbox full)" in r["warnings"][-1]
+
+
+def test_broadcast_where_everyone_fills_up_mid_send_still_fails(
+    make_ident, owner_send, conn, monkeypatch
+):
+    make_ident()
+    make_ident()
+    monkeypatch.setattr(mail.LIMITS, "open_per_recipient", 1)
+    seen: set[str] = set()
+    real = mail._open_count
+
+    def all_full_second_time(conn, alias):
+        if alias in seen:
+            return 1
+        seen.add(alias)
+        return real(conn, alias)
+
+    monkeypatch.setattr(mail, "_open_count", all_full_second_time)
+    with pytest.raises(MailboxError, match="every other agent's inbox is full"):
+        owner_send("all")
+    assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+
+def test_direct_send_with_one_full_recipient_delivers_to_nobody(
+    make_ident, owner_send, conn, monkeypatch
+):
+    """Direct sends keep the loud, all-or-nothing failure: half a delivery to a
+    hand-picked list would be worse than none."""
+    a, b = make_ident(), make_ident()
+    monkeypatch.setattr(mail.LIMITS, "open_per_recipient", 1)
+    owner_send(a.alias)  # a's inbox is now at the cap
+    with pytest.raises(MailboxError, match="not keeping up"):
+        owner_send([a.alias, b.alias])
+    assert conn.execute(
+        "SELECT COUNT(*) FROM deliveries WHERE to_alias = ?", (b.alias,)
+    ).fetchone()[0] == 0
+
+
 def test_unseen_ignores_clocks_and_status_reports_liveness(make_ident, owner_send, conn, root):
     a, b = make_ident(), make_ident()
     old = owner_send(a.alias, "arrived before the wait")
