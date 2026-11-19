@@ -52,9 +52,7 @@ def test_pi_session_never_records_an_inherited_claude_session_id(make_ident, con
     # one are both set, so ancestry decides; the inherited claude session id must never
     # be recorded for the Pi session (Claude Code hooks would bind to it otherwise).
     monkeypatch.setattr("agent_mailbox.procs.nearest_named", lambda *a, **k: "pi")
-    ident = make_ident(
-        env={"CLAUDE_CODE_SESSION_ID": "outer-claude", "PI_CODING_AGENT": "true"}
-    )
+    ident = make_ident(env={"CLAUDE_CODE_SESSION_ID": "outer-claude", "PI_CODING_AGENT": "true"})
     row = conn.execute(
         "SELECT client, claude_session_id FROM sessions WHERE id = ?", (ident.session_id,)
     ).fetchone()

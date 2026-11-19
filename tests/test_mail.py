@@ -353,9 +353,10 @@ def test_direct_send_with_one_full_recipient_delivers_to_nobody(
     owner_send(a.alias)  # a's inbox is now at the cap
     with pytest.raises(MailboxError, match="not keeping up"):
         owner_send([a.alias, b.alias])
-    assert conn.execute(
-        "SELECT COUNT(*) FROM deliveries WHERE to_alias = ?", (b.alias,)
-    ).fetchone()[0] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) FROM deliveries WHERE to_alias = ?", (b.alias,)).fetchone()[0]
+        == 0
+    )
 
 
 def test_unseen_ignores_clocks_and_status_reports_liveness(make_ident, owner_send, conn, root):

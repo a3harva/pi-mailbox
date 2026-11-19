@@ -60,6 +60,7 @@ def test_nested_client_uses_ancestry_to_disambiguate(monkeypatch, make_ident):
     """Two markers means a client inside another one, which inherited the outer client's
     variables; the nearest client process (the inner one) decides."""
     for nearest, expected in (("pi", "pi"), ("claude-code", "claude-code")):
+
         def fake_nearest(*a, _names=None, _pid=None, _table=None, _n=nearest):
             return _n
 
