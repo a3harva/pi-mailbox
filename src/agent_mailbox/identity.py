@@ -28,8 +28,25 @@ STARTUP_GRACE_SECONDS = 60
 
 KNOWN_CLIENTS = {"claude-code": "claude-code", "claude code": "claude-code", "pi": "pi"}
 # Process names of the clients, for when the environment is ambiguous: a client started
-# from inside another one (Pi from a Claude Code shell) inherits that client's variables.
+# from inside another one (Pi from a Claude Code shell) inherits that client's marker
+# variables, so both can be set at once. Only then (or with no marker at all) does the
+# process tree decide; a client's own markers always beat an ancestor's name.
 CLIENT_PROCESSES = {"claude": "claude-code", "pi": "pi"}
+
+
+def env_marked_clients(env: dict[str, str]) -> set[str]:
+    """Clients whose own marker variables are set in ``env``.
+
+    Exactly one means that client is running, however the process tree looks. Two means
+    a client nested inside another one, which inherited the outer client's markers:
+    only process ancestry can say which is the inner (live) one.
+    """
+    marked = set()
+    if env.get("CLAUDECODE") == "1" or env.get("CLAUDE_CODE_SESSION_ID"):
+        marked.add("claude-code")
+    if env.get("PI_CODING_AGENT"):
+        marked.add("pi")
+    return marked
 
 
 # --- naming ---------------------------------------------------------------------
@@ -314,14 +331,22 @@ class Identity:
         cleanup_provisional(conn, root)
         top = project_root(cwd)
         client = (
-            (
-                slug(env["AGENT_MAILBOX_CLIENT"], max_len=20)
-                if env.get("AGENT_MAILBOX_CLIENT")
-                else None
-            )
-            or procs.nearest_named(CLIENT_PROCESSES)
-            or detect_client(env)
+            slug(env["AGENT_MAILBOX_CLIENT"], max_len=20)
+            if env.get("AGENT_MAILBOX_CLIENT")
+            else None
         )
+        if client is None:
+            marked = env_marked_clients(env)
+            if len(marked) == 1:
+                # The client's own marker beats any ancestor's program name: a Claude
+                # Code session started under Pi (or under anything named "pi") is still
+                # Claude Code.
+                client = next(iter(marked))
+            else:
+                # No marker, or two (a client nested inside another one, which
+                # inherited the outer client's markers): the nearest client process
+                # in the tree is the one actually running.
+                client = procs.nearest_named(CLIENT_PROCESSES) or detect_client(env)
         nested = procs.count_named(CLIENT_PROCESSES) > 1
         ident = cls(
             conn=conn,

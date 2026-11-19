@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Client detection:** a session's own marker variables (`CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID`, `PI_CODING_AGENT`) now identify its client; the process
+  tree is only consulted when no marker is set, or when two are set (a client started
+  inside another one, which inherited the outer client's markers). Before, any ancestor
+  program named `pi` or `claude` overrode the client's own markers, so e.g. a Claude
+  Code session started from inside Pi got a `pi-*` alias and lost role resume.
+- **Broadcasts vs full inboxes:** an inbox that filled up between the recipient
+  pre-check and the write transaction is now skipped with a warning, like the
+  pre-check already did, instead of aborting the whole broadcast with an error.
+  Direct sends still fail loudly (all-or-nothing) when a named recipient is full.
+
 - **Stalled deliveries:**
   - an idle session is woken again for mail that arrives within a minute of its last
     wake-up, once it has finished the turn that wake-up started;
